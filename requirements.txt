@@ -3,3 +3,4 @@ uvicorn
 faster-whisper
 openai
 python-dotenv
+python-multipart
