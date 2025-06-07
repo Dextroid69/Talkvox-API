@@ -8,7 +8,7 @@ import shutil
 import uuid
 
 app = FastAPI()
-model = WhisperModel("medium", device="cpu", compute_type="int8")
+model = WhisperModel("base", device="cpu", compute_type="int8")
 
 client = OpenAI(
     api_key="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",
