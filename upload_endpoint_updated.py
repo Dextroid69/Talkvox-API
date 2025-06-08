@@ -22,6 +22,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 async def ping():
     return {"message": "pong"}
 
+@app.get("/")
+async def root():
+    return {"message": "API Talkvox en línea 🚀"}
+
 @app.post("/transcribe")
 async def transcribe_audio(request: Request, file: UploadFile = File(None)):
     try:
