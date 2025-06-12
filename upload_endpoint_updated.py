@@ -1,11 +1,13 @@
-
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from openai import OpenAI
+from pydub import AudioSegment
 import os
 import shutil
 import uuid
+import hashlib
+import json
 
 app = FastAPI()
 model = WhisperModel("base", device="cpu", compute_type="int8")
@@ -16,7 +18,19 @@ client = OpenAI(
 )
 
 UPLOAD_DIR = "uploads"
+CACHE_FILE = "cache_db.json"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Cargar caché (simplemente como dict en disco)
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "r") as f:
+        cache = json.load(f)
+else:
+    cache = {}
+
+def save_cache():
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
 
 @app.get("/ping")
 async def ping():
@@ -27,48 +41,78 @@ async def root():
     return {"message": "API Talkvox en línea 🚀"}
 
 @app.post("/transcribe")
-async def transcribe_audio(request: Request, file: UploadFile = File(None)):
-    try:
-        temp_filename = f"{uuid.uuid4()}.wav"
-        temp_path = os.path.join(UPLOAD_DIR, temp_filename)
+async def transcribe_audio(request: Request, files: list[UploadFile] = File(...)):
+    results = []
 
-        if file:
-            with open(temp_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-            print("Archivo recibido como multipart/form-data")
-        else:
-            body = await request.body()
-            with open(temp_path, "wb") as f:
-                f.write(body)
-            print("Archivo recibido como audio/wav crudo")
+    for file in files:
+        try:
+            # Hasheo único por nombre y tamaño
+            hash_key = await file_to_hash(file)
+            if hash_key in cache:
+                print(f"⚡ Audio en caché: {file.filename}")
+                results.append(cache[hash_key])
+                continue
 
-        segments, _ = model.transcribe(temp_path, beam_size=7)
-        transcription = ' '.join(segment.text for segment in segments)
+            # Convertir a WAV si es necesario
+            temp_path = convert_to_wav(file)
 
-        # Generar resumen usando modelo gratuito de OpenRouter
-        summary = get_chat_response(transcription)
+            # Transcribir
+            segments, _ = model.transcribe(temp_path, beam_size=7)
+            transcription = ' '.join(segment.text for segment in segments)
 
-        os.remove(temp_path)
+            # Resumen
+            summary = get_chat_response(transcription)
 
-        return {
-            "transcription": transcription,
-            "summary": summary
-        }
+            # Resultado y caché
+            result = {
+                "filename": file.filename,
+                "transcription": transcription,
+                "summary": summary
+            }
+            results.append(result)
+            cache[hash_key] = result
+            save_cache()
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+            os.remove(temp_path)
+
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "error": str(e)
+            })
+
+    return results
+
+def convert_to_wav(file: UploadFile) -> str:
+    extension = file.filename.split(".")[-1].lower()
+    raw_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
+    wav_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.wav")
+
+    with open(raw_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    sound = AudioSegment.from_file(raw_path)
+    sound = sound.set_channels(1).set_frame_rate(16000)
+    sound.export(wav_path, format="wav")
+    os.remove(raw_path)
+    return wav_path
+
+async def file_to_hash(file: UploadFile) -> str:
+    file.file.seek(0)
+    content = await file.read()
+    file.file.seek(0)
+    return hashlib.sha256(content).hexdigest()
 
 def get_chat_response(query, model="deepseek/deepseek-r1:free"):
     try:
         completion = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Eres un experto en resumir. Resume la siguiente transcripción.:"},
+                {"role": "system", "content": "Eres un experto en resumir. Resume la siguiente transcripción:"},
                 {"role": "user", "content": query}
             ]
         )
         return completion.choices[0].message.content
     except Exception as e:
         return f"Error: {str(e)}"
+
